@@ -1,0 +1,376 @@
+# XFeat 运行参考
+
+本文档记录如何用 `uv` 配置环境、运行最小测试、执行两张图片的特征匹配可视化，以及各脚本的输入输出。可作为其他项目接入 XFeat 的参考。
+
+## 1. 环境检查
+
+先检查 GPU 和 `uv` 是否可用：
+
+```bash
+nvidia-smi
+uv --version
+```
+
+本项目当前验证环境：
+
+```text
+GPU: NVIDIA H800
+Driver: 560.35.03
+CUDA: 12.6
+uv: 0.11.7
+Python: 3.10.20
+PyTorch: 2.11.0+cu126
+```
+
+## 2. 使用 uv 创建环境
+
+在项目根目录执行：
+
+```bash
+uv venv .venv --python 3.10
+```
+
+安装 CUDA 12.6 版本 PyTorch：
+
+```bash
+uv pip install --python .venv/bin/python torch --index-url https://download.pytorch.org/whl/cu126
+```
+
+安装项目依赖：
+
+```bash
+uv pip install --python .venv/bin/python -r requirements.txt
+```
+
+激活环境：
+
+```bash
+source .venv/bin/activate
+```
+
+验证 PyTorch 是否识别 GPU：
+
+```bash
+.venv/bin/python -c "import torch; print(torch.__version__); print(torch.cuda.is_available()); print(torch.version.cuda); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'cpu')"
+```
+
+如果只需要 CPU，也可以安装 CPU 版 PyTorch，参考 PyTorch 官网选择合适 wheel。
+
+## 3. 权重文件
+
+默认推理权重路径：
+
+```text
+weights/xfeat.pt
+```
+
+LighterGlue 权重路径：
+
+```text
+weights/xfeat-lighterglue.pt
+```
+
+`XFeat()` 默认会从 `weights/xfeat.pt` 加载权重。如果缺少该文件，需要先下载或复制到上述路径。
+
+## 4. 最小测试脚本
+
+运行：
+
+```bash
+.venv/bin/python minimal_example.py
+```
+
+输入：
+
+```python
+torch.Tensor(B, C, H, W)
+```
+
+示例中使用随机输入：
+
+```python
+torch.randn(1, 3, 480, 640)
+```
+
+输出：
+
+```python
+output = xfeat.detectAndCompute(image, top_k=4096)[0]
+```
+
+字段含义：
+
+```text
+output["keypoints"]    -> torch.Tensor(N, 2), 关键点坐标，格式为 x, y
+output["descriptors"]  -> torch.Tensor(N, 64), 每个关键点的 64 维描述子
+output["scores"]       -> torch.Tensor(N), 关键点分数
+```
+
+注意：`minimal_example.py` 内部设置了：
+
+```python
+os.environ['CUDA_VISIBLE_DEVICES'] = ''
+```
+
+这会强制使用 CPU。如果要用 GPU 跑该脚本，需要注释掉这一行。
+
+## 5. 两张图片匹配并输出可视化
+
+本项目中示例输入图片放在：
+
+```text
+data/aabb_ref_22010708_00000304.png
+data/aabb_cur_22010710_00000305.png
+```
+
+运行下面命令会执行 XFeat 匹配，使用 RANSAC 过滤几何一致内点，并输出可视化图片：
+
+```bash
+mkdir -p outputs
+.venv/bin/python - <<'PY'
+import cv2
+import numpy as np
+import torch
+from modules.xfeat import XFeat
+
+img0_path = 'data/aabb_ref_22010708_00000304.png'
+img1_path = 'data/aabb_cur_22010710_00000305.png'
+out_path = 'outputs/xfeat_matches_inliers.png'
+raw_out_path = 'outputs/xfeat_matches_raw.png'
+
+img0 = cv2.imread(img0_path, cv2.IMREAD_COLOR)
+img1 = cv2.imread(img1_path, cv2.IMREAD_COLOR)
+if img0 is None:
+    raise RuntimeError(f'Failed to read {img0_path}')
+if img1 is None:
+    raise RuntimeError(f'Failed to read {img1_path}')
+
+print('image0:', img0_path, img0.shape)
+print('image1:', img1_path, img1.shape)
+print('torch:', torch.__version__, 'cuda:', torch.cuda.is_available())
+
+xfeat = XFeat(top_k=4096)
+mkpts0, mkpts1 = xfeat.match_xfeat(img0, img1, top_k=4096, min_cossim=0.82)
+print('raw_matches:', len(mkpts0))
+
+if len(mkpts0) == 0:
+    raise RuntimeError('No matches found. Try lowering min_cossim.')
+
+kp0 = [cv2.KeyPoint(float(p[0]), float(p[1]), 5) for p in mkpts0]
+kp1 = [cv2.KeyPoint(float(p[0]), float(p[1]), 5) for p in mkpts1]
+matches = [cv2.DMatch(i, i, 0.0) for i in range(len(mkpts0))]
+
+raw_vis = cv2.drawMatches(
+    img0, kp0, img1, kp1, matches[:500], None,
+    matchColor=(0, 255, 255), singlePointColor=(255, 0, 0),
+    flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS,
+)
+cv2.imwrite(raw_out_path, raw_vis)
+
+inlier_mask = None
+if len(mkpts0) >= 4:
+    try:
+        _, inliers = cv2.findHomography(mkpts0, mkpts1, cv2.USAC_MAGSAC, 4.0, maxIters=5000, confidence=0.999)
+    except Exception:
+        _, inliers = cv2.findHomography(mkpts0, mkpts1, cv2.RANSAC, 4.0, maxIters=5000, confidence=0.999)
+    if inliers is not None:
+        inlier_mask = inliers.reshape(-1).astype(bool)
+
+if inlier_mask is not None and int(inlier_mask.sum()) > 0:
+    inlier_indices = np.flatnonzero(inlier_mask)
+    draw_matches = [matches[i] for i in inlier_indices[:500]]
+    title = f'XFeat matches: raw={len(matches)}, inliers={int(inlier_mask.sum())}'
+    print('ransac_inliers:', int(inlier_mask.sum()))
+else:
+    draw_matches = matches[:500]
+    title = f'XFeat matches: raw={len(matches)}, no homography inliers'
+    print('ransac_inliers:', 0)
+
+vis = cv2.drawMatches(
+    img0, kp0, img1, kp1, draw_matches, None,
+    matchColor=(0, 220, 0), singlePointColor=(255, 0, 0),
+    flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS,
+)
+cv2.rectangle(vis, (0, 0), (min(vis.shape[1] - 1, 900), 44), (0, 0, 0), -1)
+cv2.putText(vis, title, (12, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2, cv2.LINE_AA)
+
+cv2.imwrite(out_path, vis)
+print('saved:', out_path)
+print('saved:', raw_out_path)
+PY
+```
+
+输入：
+
+```text
+两张图片，OpenCV 可读取格式均可，例如 png/jpg/jpeg/bmp/tif。
+默认读取为 BGR 格式的 numpy.ndarray，形状为 H, W, 3。
+```
+
+核心调用：
+
+```python
+mkpts0, mkpts1 = xfeat.match_xfeat(img0, img1, top_k=4096, min_cossim=0.82)
+```
+
+输出：
+
+```text
+mkpts0 -> np.ndarray(N, 2), 第一张图中的匹配点，格式 x, y
+mkpts1 -> np.ndarray(N, 2), 第二张图中的匹配点，格式 x, y
+```
+
+可视化输出：
+
+```text
+outputs/xfeat_matches_inliers.png  # RANSAC 内点匹配结果
+outputs/xfeat_matches_raw.png      # 原始匹配结果预览
+```
+
+本项目当前两张示例图的运行结果：
+
+```text
+raw_matches: 1272
+ransac_inliers: 316
+```
+
+## 6. 生成缩小预览图
+
+如果完整可视化图太大，可以生成压缩预览：
+
+```bash
+.venv/bin/python - <<'PY'
+import cv2
+
+src = 'outputs/xfeat_matches_inliers.png'
+dst = 'outputs/xfeat_matches_inliers_preview.jpg'
+img = cv2.imread(src, cv2.IMREAD_COLOR)
+if img is None:
+    raise RuntimeError(f'Failed to read {src}')
+
+max_w = 900
+scale = min(1.0, max_w / img.shape[1])
+preview = cv2.resize(img, (int(img.shape[1] * scale), int(img.shape[0] * scale)), interpolation=cv2.INTER_AREA)
+cv2.imwrite(dst, preview, [int(cv2.IMWRITE_JPEG_QUALITY), 82])
+print('saved:', dst, preview.shape)
+PY
+```
+
+输出：
+
+```text
+outputs/xfeat_matches_inliers_preview.jpg
+```
+
+## 7. 实时 Demo
+
+查看参数：
+
+```bash
+.venv/bin/python realtime_demo.py -h
+```
+
+使用 XFeat 启动摄像头实时匹配：
+
+```bash
+.venv/bin/python realtime_demo.py --method XFeat
+```
+
+也可以对比 SIFT 或 ORB：
+
+```bash
+.venv/bin/python realtime_demo.py --method SIFT
+.venv/bin/python realtime_demo.py --method ORB
+```
+
+输入：
+
+```text
+摄像头视频流。
+默认摄像头编号为 0，默认分辨率为 640x480。
+```
+
+常用参数：
+
+```text
+--width      视频宽度，默认 640
+--height     视频高度，默认 480
+--max_kpts   最大关键点数量，默认 3000
+--method     ORB / SIFT / XFeat，默认 XFeat
+--cam        摄像头编号，默认 0
+```
+
+输出：
+
+```text
+OpenCV 窗口显示参考帧、当前帧、匹配线和估计的单应性注册结果。
+```
+
+使用方式：
+
+```text
+按 s 设置参考图像。
+该 demo 使用 homography 模型，适合平面场景或纯旋转运动。
+```
+
+## 8. 在其他项目中接入 XFeat
+
+最小代码：
+
+```python
+import cv2
+from modules.xfeat import XFeat
+
+xfeat = XFeat(top_k=4096)
+
+img0 = cv2.imread('image0.png', cv2.IMREAD_COLOR)
+img1 = cv2.imread('image1.png', cv2.IMREAD_COLOR)
+
+mkpts0, mkpts1 = xfeat.match_xfeat(img0, img1, top_k=4096, min_cossim=0.82)
+```
+
+如果只提取单张图的局部特征：
+
+```python
+import torch
+from modules.xfeat import XFeat
+
+xfeat = XFeat(top_k=4096)
+image = torch.randn(1, 3, 480, 640)
+features = xfeat.detectAndCompute(image, top_k=4096)[0]
+
+keypoints = features['keypoints']
+descriptors = features['descriptors']
+scores = features['scores']
+```
+
+## 9. 常见问题
+
+如果提示找不到权重：
+
+```text
+检查 weights/xfeat.pt 是否存在。
+```
+
+如果 `torch.cuda.is_available()` 为 `False`：
+
+```text
+检查 nvidia-smi 是否正常。
+检查安装的 PyTorch wheel 是否和 CUDA/驱动匹配。
+如果只安装了 CPU 版 PyTorch，需要重新安装 CUDA 版本。
+```
+
+如果匹配数量太少：
+
+```text
+适当降低 min_cossim，例如从 0.82 降到 0.7。
+增加 top_k，例如从 4096 增加到 8000。
+检查两张图是否确实有重叠区域。
+```
+
+如果可视化图片太大：
+
+```text
+使用第 6 节生成 preview jpg。
+减少 drawMatches 中绘制的匹配数量，例如只画前 200 条。
+```
