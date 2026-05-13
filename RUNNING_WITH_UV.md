@@ -234,7 +234,117 @@ raw_matches: 1272
 ransac_inliers: 316
 ```
 
-## 6. 生成缩小预览图
+## 6. 使用 semi-dense 匹配
+
+XFeat 还提供 semi-dense 匹配，代码入口是：
+
+```python
+mkpts0, mkpts1 = xfeat.match_xfeat_star(img0, img1, top_k=4096)
+```
+
+它和 `match_xfeat()` 不同：
+
+```text
+match_xfeat()      -> sparse matching，先检测关键点，再匹配关键点描述子。
+match_xfeat_star() -> semi-dense matching，提取更密集的 coarse features，再用 fine matcher 做匹配细化。
+```
+
+运行下面命令可以对同一组图片执行 semi-dense 匹配并输出可视化：
+
+```bash
+mkdir -p outputs
+.venv/bin/python - <<'PY'
+import cv2
+import numpy as np
+import torch
+from modules.xfeat import XFeat
+
+img0_path = 'data/aabb_ref_22010708_00000304.png'
+img1_path = 'data/aabb_cur_22010710_00000305.png'
+out_path = 'outputs/xfeat_semidense_matches.png'
+
+img0 = cv2.imread(img0_path, cv2.IMREAD_COLOR)
+img1 = cv2.imread(img1_path, cv2.IMREAD_COLOR)
+if img0 is None:
+    raise RuntimeError(f'Failed to read {img0_path}')
+if img1 is None:
+    raise RuntimeError(f'Failed to read {img1_path}')
+
+print('torch:', torch.__version__, 'cuda:', torch.cuda.is_available())
+
+xfeat = XFeat(top_k=4096)
+mkpts0, mkpts1 = xfeat.match_xfeat_star(img0, img1, top_k=4096)
+print('semi_dense_matches:', len(mkpts0))
+
+if len(mkpts0) == 0:
+    raise RuntimeError('No matches found.')
+
+inlier_mask = None
+if len(mkpts0) >= 4:
+    try:
+        _, inliers = cv2.findHomography(mkpts0, mkpts1, cv2.USAC_MAGSAC, 4.0, maxIters=5000, confidence=0.999)
+    except Exception:
+        _, inliers = cv2.findHomography(mkpts0, mkpts1, cv2.RANSAC, 4.0, maxIters=5000, confidence=0.999)
+    if inliers is not None:
+        inlier_mask = inliers.reshape(-1).astype(bool)
+
+if inlier_mask is not None and int(inlier_mask.sum()) > 0:
+    draw_ids = np.flatnonzero(inlier_mask)[:500]
+    title = f'XFeat semi-dense: raw={len(mkpts0)}, inliers={int(inlier_mask.sum())}'
+    print('ransac_inliers:', int(inlier_mask.sum()))
+else:
+    draw_ids = np.arange(min(len(mkpts0), 500))
+    title = f'XFeat semi-dense: raw={len(mkpts0)}, no homography inliers'
+    print('ransac_inliers:', 0)
+
+kp0 = [cv2.KeyPoint(float(mkpts0[i][0]), float(mkpts0[i][1]), 5) for i in draw_ids]
+kp1 = [cv2.KeyPoint(float(mkpts1[i][0]), float(mkpts1[i][1]), 5) for i in draw_ids]
+matches = [cv2.DMatch(i, i, 0.0) for i in range(len(draw_ids))]
+
+vis = cv2.drawMatches(
+    img0, kp0, img1, kp1, matches, None,
+    matchColor=(0, 220, 0), singlePointColor=(255, 0, 0),
+    flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS,
+)
+cv2.rectangle(vis, (0, 0), (min(vis.shape[1] - 1, 1100), 44), (0, 0, 0), -1)
+cv2.putText(vis, title, (12, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2, cv2.LINE_AA)
+cv2.imwrite(out_path, vis)
+print('saved:', out_path)
+PY
+```
+
+输入：
+
+```text
+两张图片，OpenCV 可读取格式均可，例如 png/jpg/jpeg/bmp/tif。
+默认读取为 BGR 格式的 numpy.ndarray，形状为 H, W, 3。
+```
+
+输出：
+
+```text
+mkpts0 -> np.ndarray(N, 2), 第一张图中的匹配点，格式 x, y
+mkpts1 -> np.ndarray(N, 2), 第二张图中的匹配点，格式 x, y
+```
+
+可视化输出：
+
+```text
+outputs/xfeat_semidense_matches.png
+```
+
+本项目当前两张示例图的对比结果：
+
+```text
+sparse_matches: 1272
+sparse_inliers: 316
+semi_dense_matches: 1019
+semi_dense_inliers: 424
+```
+
+这组图上 semi-dense 的原始匹配更少，但几何一致内点更多，内点率更高。对于配准、姿态估计、几何验证这类任务，建议优先尝试 `match_xfeat_star()`；如果更看重简单和低延迟，可以继续使用 `match_xfeat()`。
+
+## 7. 生成缩小预览图
 
 如果完整可视化图太大，可以生成压缩预览：
 
@@ -262,7 +372,7 @@ PY
 outputs/xfeat_matches_inliers_preview.jpg
 ```
 
-## 7. 实时 Demo
+## 8. 实时 Demo
 
 查看参数：
 
@@ -313,7 +423,7 @@ OpenCV 窗口显示参考帧、当前帧、匹配线和估计的单应性注册�
 该 demo 使用 homography 模型，适合平面场景或纯旋转运动。
 ```
 
-## 8. 在其他项目中接入 XFeat
+## 9. 在其他项目中接入 XFeat
 
 最小代码：
 
@@ -344,7 +454,7 @@ descriptors = features['descriptors']
 scores = features['scores']
 ```
 
-## 9. 常见问题
+## 10. 常见问题
 
 如果提示找不到权重：
 
@@ -371,6 +481,6 @@ scores = features['scores']
 如果可视化图片太大：
 
 ```text
-使用第 6 节生成 preview jpg。
+使用第 7 节生成 preview jpg。
 减少 drawMatches 中绘制的匹配数量，例如只画前 200 条。
 ```
