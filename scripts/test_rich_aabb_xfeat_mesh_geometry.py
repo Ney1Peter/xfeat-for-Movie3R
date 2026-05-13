@@ -25,7 +25,7 @@ from test_rich_aabb_xfeat_geometry import (
     resize_for_matching,
     to_original_coords,
 )
-from visualize_rich_mesh_correspondences import camera_transform, projected_vertices
+from visualize_rich_mesh_correspondences import camera_transform, mask_lookup, projected_vertices
 from visualize_rich_mesh_projection import load_ply_vertices
 
 
@@ -39,6 +39,7 @@ def parse_args():
     parser.add_argument("--start_frame", type=int, default=100)
     parser.add_argument("--top_k", type=int, default=8192)
     parser.add_argument("--min_cossim", type=float, default=0.9)
+    parser.add_argument("--match_mode", choices=["sparse", "semidense"], default="sparse")
     parser.add_argument("--max_dim", type=int, default=1200)
     parser.add_argument("--mesh_max_dim", type=int, default=1400)
     parser.add_argument("--mesh_lookup_radius", type=int, default=4)
@@ -82,6 +83,31 @@ def build_visible_vertex_map(xyz, rich_root, seq, image_shape, mesh_max_dim, mes
         "idx_map": idx_map.reshape(hs, ws),
         "z_map": z_map.reshape(hs, ws),
         "visible": visible,
+    }
+
+
+def compute_visible_overlap(ref_map, cur_map, mask_ref, mask_cur):
+    visible_ref = ref_map["visible"].copy()
+    visible_cur = cur_map["visible"].copy()
+    ref_human = mask_lookup(mask_ref, ref_map["proj"]["x"], ref_map["proj"]["y"])
+    cur_human = mask_lookup(mask_cur, cur_map["proj"]["x"], cur_map["proj"]["y"])
+    visible_ref &= ~ref_human
+    visible_cur &= ~cur_human
+
+    visible_ref_count = int(np.count_nonzero(visible_ref))
+    visible_cur_count = int(np.count_nonzero(visible_cur))
+    shared_visible = int(np.count_nonzero(visible_ref & visible_cur))
+    union_visible = int(np.count_nonzero(visible_ref | visible_cur))
+    return {
+        "visible_ref": visible_ref_count,
+        "visible_cur": visible_cur_count,
+        "shared_visible": shared_visible,
+        "union_visible": union_visible,
+        "overlap_ref": float(shared_visible / max(visible_ref_count, 1)),
+        "overlap_cur": float(shared_visible / max(visible_cur_count, 1)),
+        "overlap_min": float(shared_visible / max(min(visible_ref_count, visible_cur_count), 1)),
+        "overlap_max": float(shared_visible / max(max(visible_ref_count, visible_cur_count), 1)),
+        "jaccard": float(shared_visible / max(union_visible, 1)),
     }
 
 
@@ -195,12 +221,28 @@ def run_pair(xfeat, xyz, map_cache, pair, out_dir, args):
     img_ref_match, sx_ref, sy_ref = resize_for_matching(img_ref, args.max_dim)
     img_cur_match, sx_cur, sy_cur = resize_for_matching(img_cur, args.max_dim)
 
-    mkpts_ref, mkpts_cur = xfeat.match_xfeat(
-        img_ref_match,
-        img_cur_match,
-        top_k=args.top_k,
-        min_cossim=args.min_cossim,
-    )
+    # **========== 原始代码：只使用 sparse XFeat matching ==========**
+    # mkpts_ref, mkpts_cur = xfeat.match_xfeat(
+    #     img_ref_match,
+    #     img_cur_match,
+    #     top_k=args.top_k,
+    #     min_cossim=args.min_cossim,
+    # )
+    # **========== 新代码：支持 sparse / semi-dense XFeat matching ==========**
+    if args.match_mode == "semidense":
+        mkpts_ref, mkpts_cur = xfeat.match_xfeat_star(
+            img_ref_match,
+            img_cur_match,
+            top_k=args.top_k,
+        )
+    else:
+        mkpts_ref, mkpts_cur = xfeat.match_xfeat(
+            img_ref_match,
+            img_cur_match,
+            top_k=args.top_k,
+            min_cossim=args.min_cossim,
+        )
+    # **========== 结束 ==========**
     mkpts_ref = np.asarray(mkpts_ref, dtype=np.float32)
     mkpts_cur = np.asarray(mkpts_cur, dtype=np.float32)
     mkpts_ref_orig = to_original_coords(mkpts_ref, sx_ref, sy_ref)
@@ -212,6 +254,7 @@ def run_pair(xfeat, xyz, map_cache, pair, out_dir, args):
 
     mask_ref = load_mask(args.data_root, pair["ref_seq"], pair["ref_frame"], img_ref.shape)
     mask_cur = load_mask(args.data_root, pair["cur_seq"], pair["cur_frame"], img_cur.shape)
+    visible_overlap = compute_visible_overlap(map_cache[pair["ref_seq"]], map_cache[pair["cur_seq"]], mask_ref, mask_cur)
     ransac_mask = compute_ransac_inliers(mkpts_ref, mkpts_cur, args.ransac_thresh)
     fundamental_mask = compute_fundamental_inliers(mkpts_ref, mkpts_cur, args.fundamental_thresh)
     eval_items = evaluate_mesh_geometry(
@@ -264,6 +307,7 @@ def run_pair(xfeat, xyz, map_cache, pair, out_dir, args):
         "cur": {"seq": pair["cur_seq"], "frame": int(pair["cur_frame"]), "image": str(img_cur_path)},
         "top_k": int(args.top_k),
         "min_cossim": float(args.min_cossim),
+        "match_mode": args.match_mode,
         "match_max_dim": int(args.max_dim),
         "mesh_max_dim": int(args.mesh_max_dim),
         "mesh_lookup_radius": int(args.mesh_lookup_radius),
@@ -272,6 +316,8 @@ def run_pair(xfeat, xyz, map_cache, pair, out_dir, args):
         "homography_ransac_inliers": int(ransac_mask.sum()),
         "fundamental_ransac_inliers": int(fundamental_mask.sum()),
         "mesh_geometry_inliers": int(mesh_mask.sum()),
+        "overlap_min": visible_overlap["overlap_min"],
+        "mesh_visible_overlap": visible_overlap,
         "mesh_geometry_inlier_ratio": float(mesh_mask.sum() / max(len(mkpts_ref), 1)),
         "mesh_inliers_inside_ransac": int((mesh_mask & ransac_mask).sum()),
         "mesh_inliers_inside_fundamental": int((mesh_mask & fundamental_mask).sum()),
