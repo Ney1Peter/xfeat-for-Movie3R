@@ -1,6 +1,47 @@
 # XFeat 运行参考
 
-本文档记录如何用 `uv` 配置环境、运行最小测试、执行两张图片的特征匹配可视化，以及各脚本的输入输出。可作为其他项目接入 XFeat 的参考。
+本文档记录如何在新设备上恢复项目、用 `uv` 配置环境、运行最小测试、执行两张图片的特征匹配可视化，以及各脚本的输入输出。可作为其他项目接入 XFeat 的参考。
+
+## 新设备快速恢复
+
+在新设备上从零恢复项目，优先执行这一节：
+
+```bash
+git clone https://github.com/Ney1Peter/xfeat-for-Movie3R.git
+cd xfeat-for-Movie3R
+git checkout main
+git pull --ff-only origin main
+```
+
+确认关键文件已经随 Git 拉取下来：
+
+```bash
+git ls-files RUNNING_WITH_UV.md requirements.txt minimal_example.py realtime_demo.py weights data scripts
+```
+
+应该至少包含这些文件：
+
+```text
+RUNNING_WITH_UV.md
+requirements.txt
+minimal_example.py
+realtime_demo.py
+weights/xfeat.pt
+weights/xfeat-lighterglue.pt
+data/aabb_ref_22010708_00000304.png
+data/aabb_cur_22010710_00000305.png
+scripts/test_avatarrex_xfeat_geometry.py
+scripts/test_rich_aabb_xfeat_geometry.py
+scripts/test_rich_aabb_xfeat_mesh_geometry.py
+scripts/compute_rich_camera_overlap.py
+scripts/visualize_rich_gt_projection.py
+scripts/visualize_rich_mesh_projection.py
+scripts/visualize_rich_mesh_correspondences.py
+```
+
+然后继续执行第 1 节到第 4 节完成环境配置和最小测试。如果只想验证两张样例图的匹配，继续执行第 5 节或第 6 节。
+
+当前仓库里的 `outputs/` 是运行生成结果，不需要随 Git 迁移；在新设备上重新运行脚本即可生成。
 
 ## 1. 环境检查
 
@@ -454,7 +495,231 @@ descriptors = features['descriptors']
 scores = features['scores']
 ```
 
-## 10. 常见问题
+## 10. 诊断脚本
+
+本仓库还包含一些面向 Movie3R/RICH/AvatarReX 数据的诊断脚本。它们不是运行 XFeat 的必要步骤，但已经提交到 Git，可在新设备上直接使用。
+
+### AvatarReX 样例几何诊断
+
+脚本：
+
+```text
+scripts/test_avatarrex_xfeat_geometry.py
+```
+
+默认输入使用仓库中的两张样例图：
+
+```text
+data/aabb_ref_22010708_00000304.png
+data/aabb_cur_22010710_00000305.png
+```
+
+运行：
+
+```bash
+.venv/bin/python scripts/test_avatarrex_xfeat_geometry.py
+```
+
+常用参数：
+
+```text
+--img0             第一张图片路径
+--img1             第二张图片路径
+--top_k            最大关键点数量，默认 4096
+--min_cossim       sparse 匹配余弦阈值，默认 0.82
+--reproj_thresh    重投影误差阈值，默认 32.0
+--depth_rel_thresh 深度相对误差阈值，默认 0.20
+--ransac_thresh    RANSAC 阈值，默认 4.0
+--out_dir          输出目录，默认 outputs/avatarrex_xfeat_a5b5
+```
+
+输出：
+
+```text
+JSON 统计结果
+匹配/几何内点可视化图片
+```
+
+### RICH 生成深度几何诊断
+
+脚本：
+
+```text
+scripts/test_rich_aabb_xfeat_geometry.py
+```
+
+该脚本依赖本地 RICH 数据，默认路径为：
+
+```text
+/workspace/data/RICH/RICH_4Human3R/Training
+```
+
+运行示例：
+
+```bash
+.venv/bin/python scripts/test_rich_aabb_xfeat_geometry.py \
+  --data_root /workspace/data/RICH/RICH_4Human3R/Training \
+  --source_sequence BBQ_001_guitar \
+  --cam_a 0 \
+  --cam_b 1 \
+  --start_frame 100
+```
+
+输出：
+
+```text
+RICH 图像对的 XFeat 匹配统计
+RANSAC/深度几何一致性统计
+outputs/ 下的可视化结果
+```
+
+### RICH mesh 几何诊断
+
+脚本：
+
+```text
+scripts/test_rich_aabb_xfeat_mesh_geometry.py
+```
+
+该脚本使用 RICH 官方静态 scan mesh 和 XML 标定，比生成深度 `.npy` 更适合评估静态背景几何。默认路径：
+
+```text
+--rich_root /workspace/data/RICH
+--data_root /workspace/data/RICH/RICH_4Human3R/Training
+```
+
+运行 sparse 模式：
+
+```bash
+.venv/bin/python scripts/test_rich_aabb_xfeat_mesh_geometry.py \
+  --rich_root /workspace/data/RICH \
+  --data_root /workspace/data/RICH/RICH_4Human3R/Training \
+  --source_sequence BBQ_001_juggle \
+  --cam_a 3 \
+  --cam_b 4 \
+  --start_frame 100 \
+  --match_mode sparse
+```
+
+运行 semi-dense 模式：
+
+```bash
+.venv/bin/python scripts/test_rich_aabb_xfeat_mesh_geometry.py \
+  --rich_root /workspace/data/RICH \
+  --data_root /workspace/data/RICH/RICH_4Human3R/Training \
+  --source_sequence BBQ_001_juggle \
+  --cam_a 3 \
+  --cam_b 4 \
+  --start_frame 100 \
+  --match_mode semidense
+```
+
+常用参数：
+
+```text
+--top_k                 最大特征数量，默认 8192
+--min_cossim            sparse 匹配余弦阈值，默认 0.9
+--match_mode            sparse 或 semidense，默认 sparse
+--max_dim               匹配前图片最大边，默认 1200
+--mesh_max_dim          mesh 投影最大边，默认 1400
+--mesh_lookup_radius    mesh 顶点查找半径，默认 4
+--mesh_z_tol            mesh z-buffer 容差，默认 0.03
+--reproj_thresh         mesh 重投影阈值，默认 24.0
+--out_dir               输出目录，默认按参数自动生成
+```
+
+输出：
+
+```text
+匹配数量
+homography/fundamental RANSAC 内点数量
+mesh geometry 内点数量
+mesh visible overlap 统计
+可视化图片和 JSON 报告
+```
+
+### RICH 相机重叠度计算
+
+脚本：
+
+```text
+scripts/compute_rich_camera_overlap.py
+```
+
+用途：基于 RICH 静态 scan mesh 计算不同相机之间的可见顶点重叠度，并默认排除投影到 human mask 上的顶点，使指标更接近静态背景 anchor 的可用量。
+
+运行：
+
+```bash
+.venv/bin/python scripts/compute_rich_camera_overlap.py \
+  --rich_root /workspace/data/RICH \
+  --data_root /workspace/data/RICH/RICH_4Human3R/Training \
+  --source_sequence BBQ_001_juggle
+```
+
+只计算指定相机：
+
+```bash
+.venv/bin/python scripts/compute_rich_camera_overlap.py \
+  --rich_root /workspace/data/RICH \
+  --data_root /workspace/data/RICH/RICH_4Human3R/Training \
+  --source_sequence BBQ_001_juggle \
+  --cams 3,4,5
+```
+
+输出：
+
+```text
+overlap_summary.json
+overlap_pairs_sorted.csv
+training_pairs_overlap_sorted.csv
+overlap_min_matrix.csv
+jaccard_matrix.csv
+overlap_min_matrix.jpg
+jaccard_matrix.jpg
+```
+
+输出目录默认类似：
+
+```text
+outputs/rich_camera_overlap_<source_sequence>_<frame>_<mask_mode>
+```
+
+### RICH 可视化辅助脚本
+
+脚本：
+
+```text
+scripts/visualize_rich_gt_projection.py
+scripts/visualize_rich_mesh_projection.py
+scripts/visualize_rich_mesh_correspondences.py
+```
+
+用途：检查 RICH 生成深度、静态 mesh 投影、跨相机 mesh 对应点是否合理。
+
+运行示例：
+
+```bash
+.venv/bin/python scripts/visualize_rich_mesh_projection.py \
+  --rich_root /workspace/data/RICH \
+  --data_root /workspace/data/RICH/RICH_4Human3R/Training \
+  --source_sequence BBQ_001_juggle \
+  --cam 3 \
+  --frame 101
+```
+
+```bash
+.venv/bin/python scripts/visualize_rich_mesh_correspondences.py \
+  --rich_root /workspace/data/RICH \
+  --data_root /workspace/data/RICH/RICH_4Human3R/Training \
+  --source_sequence BBQ_001_juggle \
+  --cam_a 3 \
+  --cam_b 4 \
+  --frame_a 101 \
+  --frame_b 102
+```
+
+## 11. 常见问题
 
 如果提示找不到权重：
 
