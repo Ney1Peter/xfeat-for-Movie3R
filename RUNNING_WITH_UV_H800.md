@@ -1,6 +1,8 @@
-# XFeat 运行参考
+# XFeat H800 服务器运行参考
 
-本文档记录如何在新设备上恢复项目、用 `uv` 配置环境、运行最小测试、执行两张图片的特征匹配可视化，以及各脚本的输入输出。可作为其他项目接入 XFeat 的参考。
+本文档记录 H800 服务器上如何恢复项目、用 `uv` 配置环境、运行最小测试、执行两张图片的特征匹配可视化，以及各脚本的输入输出。可作为 H800 环境接入 XFeat 的参考。
+
+注意：本文档记录的是 H800 / Driver 560 / CUDA 12.6 / PyTorch cu126 参考环境。当前 L20 / Driver 550 / CUDA 12.4 服务器请使用 `RUNNING_WITH_UV_L20.md`。
 
 ## 新设备快速恢复
 
@@ -16,13 +18,14 @@ git pull --ff-only origin main
 确认关键文件已经随 Git 拉取下来：
 
 ```bash
-git ls-files RUNNING_WITH_UV.md requirements.txt minimal_example.py realtime_demo.py weights data scripts
+git ls-files RUNNING_WITH_UV_H800.md RUNNING_WITH_UV_L20.md requirements.txt minimal_example.py realtime_demo.py weights data scripts
 ```
 
 应该至少包含这些文件：
 
 ```text
-RUNNING_WITH_UV.md
+RUNNING_WITH_UV_H800.md
+RUNNING_WITH_UV_L20.md
 requirements.txt
 minimal_example.py
 realtime_demo.py
